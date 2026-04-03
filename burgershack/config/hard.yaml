@@ -1,0 +1,10 @@
+difficulty: hard
+customer_mix:
+  normal: 0.05
+  haggler: 0.15
+  sob_story: 0.15
+  fake_complaint: 0.15
+  guilt_tripper: 0.15
+  price_anchorer: 0.15
+  bulk_buyer: 0.10
+  flatterer: 0.10

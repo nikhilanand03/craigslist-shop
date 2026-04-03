@@ -37,15 +37,15 @@ except Exception as e:  # pragma: no cover
 
 try:
     from ..models import BurgershackAction, BurgershackObservation
-    from .burgershack_environment import BurgershackEnvironment
+    from .burgershack_environment import BurgerShackEnvironment
 except (ModuleNotFoundError, ImportError):
     from models import BurgershackAction, BurgershackObservation
-    from server.burgershack_environment import BurgershackEnvironment
+    from server.burgershack_environment import BurgerShackEnvironment
 
 
 # Create the app with web interface and README integration
 app = create_app(
-    BurgershackEnvironment,
+    BurgerShackEnvironment,
     BurgershackAction,
     BurgershackObservation,
     env_name="burgershack",

@@ -1,0 +1,11 @@
+difficulty: medium
+customer_mix:
+  normal: 0.20
+  loyal_regular: 0.10
+  impatient: 0.10
+  flatterer: 0.10
+  haggler: 0.15
+  sob_story: 0.10
+  bulk_buyer: 0.10
+  guilt_tripper: 0.10
+  fake_complaint: 0.05

@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Burgershack Environment Client."""
+"""BurgerShack Environment Client."""
 
 from typing import Dict
 
@@ -19,64 +19,51 @@ class BurgershackEnv(
     EnvClient[BurgershackAction, BurgershackObservation, State]
 ):
     """
-    Client for the Burgershack Environment.
+    Client for the BurgerShack Environment.
 
-    This client maintains a persistent WebSocket connection to the environment server,
-    enabling efficient multi-step interactions with lower latency.
-    Each client instance has its own dedicated environment session on the server.
+    Each episode is a single customer negotiation over WebSocket.
 
     Example:
-        >>> # Connect to a running server
-        >>> with BurgershackEnv(base_url="http://localhost:8000") as client:
-        ...     result = client.reset()
-        ...     print(result.observation.echoed_message)
-        ...
-        ...     result = client.step(BurgershackAction(message="Hello!"))
-        ...     print(result.observation.echoed_message)
-
-    Example with Docker:
-        >>> # Automatically start container and connect
-        >>> client = BurgershackEnv.from_docker_image("burgershack-env:latest")
-        >>> try:
-        ...     result = client.reset()
-        ...     result = client.step(BurgershackAction(message="Test"))
-        ... finally:
-        ...     client.close()
+        >>> async with BurgershackEnv(base_url="http://localhost:8000") as env:
+        ...     result = await env.reset()
+        ...     print(result.observation.customer_message)
+        ...     action = BurgershackAction(
+        ...         message="That'll be $4.00",
+        ...         action_type="serve",
+        ...         price=4.00,
+        ...     )
+        ...     result = await env.step(action)
     """
 
     def _step_payload(self, action: BurgershackAction) -> Dict:
-        """
-        Convert BurgershackAction to JSON payload for step message.
-
-        Args:
-            action: BurgershackAction instance
-
-        Returns:
-            Dictionary representation suitable for JSON encoding
-        """
-        return {
+        payload = {
             "message": action.message,
+            "action_type": action.action_type,
         }
+        if action.price is not None:
+            payload["price"] = action.price
+        return payload
 
     def _parse_result(self, payload: Dict) -> StepResult[BurgershackObservation]:
-        """
-        Parse server response into StepResult[BurgershackObservation].
-
-        Args:
-            payload: JSON response data from server
-
-        Returns:
-            StepResult with BurgershackObservation
-        """
         obs_data = payload.get("observation", {})
         observation = BurgershackObservation(
-            echoed_message=obs_data.get("echoed_message", ""),
-            message_length=obs_data.get("message_length", 0),
+            customer_message=obs_data.get("customer_message", ""),
+            system_message=obs_data.get("system_message", ""),
+            conversation_history=obs_data.get("conversation_history", []),
+            menu_price=obs_data.get("menu_price", 4.00),
+            cost_floor=obs_data.get("cost_floor", 2.00),
+            current_offer_price=obs_data.get("current_offer_price"),
+            turn=obs_data.get("turn", 0),
+            max_turns=obs_data.get("max_turns", 10),
+            episode_id=obs_data.get("episode_id", ""),
+            customer_persona=obs_data.get("customer_persona", ""),
+            customer_willing_to_buy=obs_data.get("customer_willing_to_buy", False),
+            outcome=obs_data.get("outcome", ""),
+            sale_price=obs_data.get("sale_price", 0.0),
+            profit=obs_data.get("profit", 0.0),
             done=payload.get("done", False),
             reward=payload.get("reward"),
-            metadata=obs_data.get("metadata", {}),
         )
-
         return StepResult(
             observation=observation,
             reward=payload.get("reward"),
@@ -84,15 +71,6 @@ class BurgershackEnv(
         )
 
     def _parse_state(self, payload: Dict) -> State:
-        """
-        Parse server response into State object.
-
-        Args:
-            payload: JSON response from state request
-
-        Returns:
-            State object with episode_id and step_count
-        """
         return State(
             episode_id=payload.get("episode_id"),
             step_count=payload.get("step_count", 0),

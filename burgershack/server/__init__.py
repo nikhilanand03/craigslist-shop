@@ -6,6 +6,6 @@
 
 """Burgershack environment server components."""
 
-from .burgershack_environment import BurgershackEnvironment
+from .burgershack_environment import BurgerShackEnvironment
 
-__all__ = ["BurgershackEnvironment"]
+__all__ = ["BurgerShackEnvironment"]
