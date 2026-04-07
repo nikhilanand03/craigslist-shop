@@ -1,9 +1,0 @@
-difficulty: easy
-customer_mix:
-  normal: 0.40
-  loyal_regular: 0.15
-  impatient: 0.15
-  flatterer: 0.10
-  haggler: 0.10
-  sob_story: 0.05
-  bulk_buyer: 0.05

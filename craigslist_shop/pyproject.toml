@@ -1,0 +1,42 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openenv-craigslist-shop"
+version = "0.1.0"
+description = "Craigslist Shop negotiation environment for OpenEnv"
+requires-python = ">=3.10"
+dependencies = [
+    # Core OpenEnv runtime (provides FastAPI server + HTTP client types)
+    "openenv-core[core]>=0.2.2",
+    # Environment-specific dependencies
+    "numpy>=1.24.0",
+    "pyyaml>=6.0",
+    "openai>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=4.0.0",
+]
+
+[project.scripts]
+# Server entry point - enables running via: uv run --project . server
+# or: python -m craigslist_shop.server.app
+server = "craigslist_shop.server.app:main"
+
+[tool.setuptools]
+include-package-data = true
+packages = ["craigslist_shop", "craigslist_shop.server"]
+package-dir = { "craigslist_shop" = ".", "craigslist_shop.server" = "server" }
+
+[tool.setuptools.package-data]
+craigslist_shop = ["tasks/*.json"]
