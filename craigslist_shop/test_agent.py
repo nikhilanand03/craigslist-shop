@@ -2,11 +2,13 @@
 """
 LLM-powered test agent for the Craigslist Shop negotiation environment.
 
-Uses Azure OpenAI (gpt-4o) to decide actions. Reads keys from key.json.
-Supports multiple agent strategies for evaluation.
+Supports two providers:
+  --provider azure   Use Azure OpenAI (default, requires key.json)
+  --provider claude  Use local Claude via `claude -p`
 
 Usage:
     python test_agent.py --strategy skilled_seller --episodes 10
+    python test_agent.py --strategy strategic_reasoner --provider claude --episodes 5
     python test_agent.py --strategy pushover --episodes 5 --quiet
     python test_agent.py --list-strategies
     python test_agent.py --strategy pushover --episodes 5 --suffix craigs_shop
@@ -18,14 +20,12 @@ Usage:
 import argparse
 import asyncio
 import json
-import os
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from openai import AzureOpenAI, OpenAI
 
 from craigslist_shop.client import CraigslistShopEnv
 from craigslist_shop.models import CraigslistShopAction
@@ -129,12 +129,49 @@ Rules:
 - Your personality shifts every message.
 """
 
+# ── Strategic Reasoner (A + C: chain-of-thought + buyer persona inference) ─
+STRATEGIES["strategic_reasoner"] = f"""\
+You are a skilled Craigslist seller who thinks analytically before every response.
+
+Before deciding your action, silently work through this analysis:
+
+1. BUYER CLASSIFICATION — Based on their opening bid vs listed price and tone:
+   - Aggressive lowballer (opened <50% of listed): They're probing. Hold firm —
+     rewarding the opening bid anchors the whole negotiation low.
+   - Budget-constrained (opened 50–75%): They want the item but have real limits.
+     Find their ceiling with small, patient steps rather than a big concession.
+   - Near-reasonable (opened 75%+): They're already close. Close efficiently —
+     over-negotiating risks losing a buyer who was nearly ready to pay.
+   - Impatient or clipped tone: They want a quick answer. Be direct and decisive.
+
+2. OFFER TRAJECTORY — If multiple offers have been exchanged, look for the pattern:
+   - Rapidly converging bids (e.g. $70 → $85 → $95): They're near their ceiling.
+     Hold or make only a tiny move — don't race them to the bottom.
+   - Slow movement or stalling: One meaningful concession can re-engage them.
+     Make it feel earned ("That's the best I can do").
+   - Buyer hasn't moved at all: Ask them to make the next move before you concede.
+
+3. WALK-AWAY SIGNAL DETECTION — Watch for: short clipped responses, phrases like
+   "that's all I have" or "forget it", no new counter-offer, repeating the same
+   number, or frustrated tone. If you detect these, weigh closing now vs. holding
+   and risking a 0-reward walkaway. A sale at 80% beats no sale.
+
+4. EXPECTED VALUE REASONING — Think in terms of outcomes:
+   - Closing at 85% of listed price is almost always better than gambling for 100%.
+   - But closing at 65% when the buyer had room is leaving real money behind.
+   - Use the buyer's signals to estimate their true ceiling, then target just below it.
+
+After this analysis, produce your action.
+{_JSON_FORMAT_INSTRUCTIONS}
+"""
+
 STRATEGY_DESCRIPTIONS = {
     "pushover": "Always matches the buyer's price, never negotiates",
     "full_price": "Never discounts, holds firm at listed price",
     "skilled_seller": "Discounts up to 10%, uses persuasion to close",
     "haggler": "Enjoys negotiation, willing to go down to 70% of listed price",
-    "random": "Random/chaotic pricing each step",
+    "random": "Random/chaotic action each step",
+    "strategic_reasoner": "Reasons about buyer type + offer trajectory before each move (best with --provider claude)",
 }
 
 BLUE = "\033[94m"
@@ -147,6 +184,71 @@ DIM = "\033[2m"
 BOLD = "\033[1m"
 RESET = "\033[0m"
 
+
+# ---------------------------------------------------------------------------
+# Claude provider
+# ---------------------------------------------------------------------------
+
+def call_claude(prompt: str) -> str:
+    """Invoke `claude -p` and return the response text."""
+    try:
+        result = subprocess.run(
+            ["claude", "-p", prompt],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except FileNotFoundError:
+        raise RuntimeError(
+            "claude CLI not found. Install Claude Code: https://claude.ai/code"
+        )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"claude -p failed (exit {result.returncode}): {result.stderr.strip()}"
+        )
+    return result.stdout.strip()
+
+
+def build_claude_prompt(strategy_prompt: str, obs, history: list[dict]) -> str:
+    """
+    Build a single prompt string for `claude -p`.
+
+    Serializes the full conversation history + current observation into one string.
+    claude -p is stateless, so we reconstruct full context on every turn.
+    """
+    # Serialize prior turns (skip the leading system message)
+    conv_parts = []
+    for msg in history:
+        if msg["role"] == "user":
+            conv_parts.append(f"[OBSERVATION]\n{msg['content']}")
+        elif msg["role"] == "assistant":
+            conv_parts.append(f"[YOUR PREVIOUS ACTION]\n{msg['content']}")
+    conv_section = "\n\n".join(conv_parts) if conv_parts else "(first turn — no prior history)"
+
+    obs_lines = [
+        f"Item: {obs.item_title} ({obs.item_category})",
+        f"Description: {obs.item_description[:400]}",
+        f"Listed price: ${obs.listed_price:.2f}",
+        f"Your last offered price: {'$' + f'{obs.current_offer_price:.2f}' if obs.current_offer_price else 'none yet'}",
+        f"Turn: {obs.turn}",
+    ]
+    if obs.system_message:
+        obs_lines.append(f"System: {obs.system_message}")
+    if obs.customer_message:
+        obs_lines.append(f"Buyer: {obs.customer_message}")
+    obs_text = "\n".join(obs_lines)
+
+    return (
+        f"{strategy_prompt}\n\n"
+        f"=== NEGOTIATION HISTORY ===\n{conv_section}\n\n"
+        f"=== CURRENT STATE ===\n{obs_text}\n\n"
+        "Respond with valid JSON only. No markdown fences, no extra text."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
 
 def load_keys() -> dict:
     for p in [
@@ -193,14 +295,30 @@ def print_state(obs):
     print(f"{YELLOW}  └──────────────────────────────────────────────────────{RESET}")
 
 
-async def run_episode(env, client, model, strategy, episode_num, task_index=None, split="test", verbose=True):
+# ---------------------------------------------------------------------------
+# Episode runner
+# ---------------------------------------------------------------------------
+
+async def run_episode(
+    env,
+    client,
+    model: str,
+    strategy: str,
+    episode_num: int,
+    task_index=None,
+    split: str = "test",
+    verbose: bool = True,
+    provider: str = "azure",
+):
     """Run a single episode (one negotiation). Returns episode result dict."""
     system_prompt = STRATEGIES[strategy]
+    # messages tracks the conversation for the Azure path; also used to build
+    # claude prompts (we serialize history from messages[1:] each turn).
     messages = [{"role": "system", "content": system_prompt}]
 
     if verbose:
         print(f"\n{CYAN}{BOLD}{'=' * 70}{RESET}")
-        print(f"{CYAN}{BOLD}  EPISODE {episode_num}{RESET}")
+        print(f"{CYAN}{BOLD}  EPISODE {episode_num}  [{provider}]{RESET}")
         print(f"{CYAN}{BOLD}{'=' * 70}{RESET}")
 
     result = await env.reset(task_index=task_index, split=split)
@@ -249,13 +367,18 @@ async def run_episode(env, client, model, strategy, episode_num, task_index=None
                 print(f"{YELLOW}    {line}{RESET}")
 
         try:
-            completion = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                max_tokens=300,
-                temperature=0.7,
-            )
-            agent_text = completion.choices[0].message.content or ""
+            if provider == "claude":
+                # Build a single stateless prompt with full context and call claude -p
+                prompt = build_claude_prompt(system_prompt, obs, messages[1:])
+                agent_text = call_claude(prompt)
+            else:
+                completion = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    max_tokens=300,
+                    temperature=0.7,
+                )
+                agent_text = completion.choices[0].message.content or ""
         except Exception as e:
             if verbose:
                 print(f"{RED}    ERROR: {e}{RESET}")
@@ -311,31 +434,37 @@ async def run_episode(env, client, model, strategy, episode_num, task_index=None
     }
 
 
-async def run(base_url: str, strategy: str, num_episodes: int, verbose: bool, suffix: str | None = None, sample: bool = False):
-    keys = load_keys()
+# ---------------------------------------------------------------------------
+# Main runner
+# ---------------------------------------------------------------------------
 
-    # Standard OpenAI (key.json or env var)
-    openai_key = keys.get("openai_api_key", os.environ.get("OPENAI_API_KEY", ""))
-    if openai_key:
-        model = keys.get("openai_model", os.environ.get("OPENAI_MODEL", "gpt-4o"))
-        client = OpenAI(api_key=openai_key)
-    else:
-        # Azure OpenAI (key.json or env vars)
-        api_key = keys.get("azure_openai_api_key", os.environ.get("AZURE_OPENAI_API_KEY", ""))
-        endpoint = keys.get("azure_openai_endpoint", os.environ.get("AZURE_OPENAI_ENDPOINT", ""))
-        model = keys.get("azure_openai_planner_deployment", os.environ.get("AZURE_OPENAI_MODEL", "gpt-4o"))
-        if not (api_key and endpoint):
-            print(f"{RED}ERROR: No API keys found. Set OPENAI_API_KEY or provide key.json.{RESET}")
-            return
+async def run(
+    base_url: str,
+    strategy: str,
+    num_episodes: int,
+    verbose: bool,
+    suffix: str | None = None,
+    sample: bool = False,
+    provider: str = "azure",
+):
+    # Azure path requires keys; Claude path does not
+    if provider == "azure":
+        keys = load_keys()
+        from openai import AzureOpenAI
         client = AzureOpenAI(
-            api_key=api_key,
-            azure_endpoint=endpoint,
+            api_key=keys["azure_openai_api_key"],
+            azure_endpoint=keys["azure_openai_endpoint"],
             api_version="2024-12-01-preview",
         )
+        model = keys.get("azure_openai_planner_deployment", "gpt-4o")
+    else:
+        client = None
+        model = "claude"
 
     print(f"\n{BOLD}{'=' * 80}{RESET}")
     print(f"{BOLD}  CRAIGSLIST SHOP NEGOTIATION EVALUATION{RESET}")
     print(f"{BOLD}{'=' * 80}{RESET}")
+    print(f"{DIM}  Provider:     {provider}{RESET}")
     print(f"{DIM}  Agent model:  {model}{RESET}")
     print(f"{DIM}  Strategy:     {strategy} — {STRATEGY_DESCRIPTIONS[strategy]}{RESET}")
     print(f"{DIM}  Episodes:     {num_episodes}{RESET}")
@@ -355,6 +484,7 @@ async def run(base_url: str, strategy: str, num_episodes: int, verbose: bool, su
             ep_result = await run_episode(
                 env, client, model, strategy, ep,
                 task_index=task_idx, split="test", verbose=verbose,
+                provider=provider,
             )
             episodes.append(ep_result)
 
@@ -398,7 +528,7 @@ async def run(base_url: str, strategy: str, num_episodes: int, verbose: bool, su
 
     # --- Print summary ---
     print(f"\n{BOLD}{'=' * 80}{RESET}")
-    print(f"{BOLD}  RESULTS — {strategy} × {num_episodes} episodes{RESET}")
+    print(f"{BOLD}  RESULTS — {strategy} ({provider}) × {num_episodes} episodes{RESET}")
     print(f"{BOLD}{'=' * 80}{RESET}")
     print(f"  Avg reward:          {avg_reward:.4f}  (std: {std_reward:.4f})")
     print(f"  Min / Max reward:    {min_reward:.4f} / {max_reward:.4f}")
@@ -433,11 +563,12 @@ async def run(base_url: str, strategy: str, num_episodes: int, verbose: bool, su
     runs_dir.mkdir(exist_ok=True)
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    batch_filename = f"{strategy}_{num_episodes}ep_{timestamp}.json"
+    batch_filename = f"{strategy}_{provider}_{num_episodes}ep_{timestamp}.json"
     batch_path = runs_dir / batch_filename
 
     batch_data = {
         "strategy": strategy,
+        "provider": provider,
         "strategy_description": STRATEGY_DESCRIPTIONS[strategy],
         "agent_model": model,
         "num_episodes": num_episodes,
@@ -464,17 +595,29 @@ async def run(base_url: str, strategy: str, num_episodes: int, verbose: bool, su
 def main():
     parser = argparse.ArgumentParser(description="LLM test agent for Craigslist Shop negotiation")
     parser.add_argument("--url", default="http://localhost:8000")
-    parser.add_argument("--strategy", default="skilled_seller",
-                        choices=list(STRATEGIES.keys()),
-                        help="Agent strategy / system prompt to use")
+    parser.add_argument(
+        "--provider",
+        default="azure",
+        choices=["azure", "claude"],
+        help="LLM provider for the seller agent (default: azure)",
+    )
+    parser.add_argument(
+        "--strategy",
+        default="skilled_seller",
+        choices=list(STRATEGIES.keys()),
+        help="Agent strategy / system prompt to use",
+    )
     parser.add_argument("--episodes", type=int, default=5,
                         help="Number of episodes to run (default: 5)")
     parser.add_argument("--quiet", action="store_true",
                         help="Suppress per-step output, show only summary")
     parser.add_argument("--suffix", default=None,
                         help="Suffix for the runs directory (e.g., --suffix v2 saves to runs_v2/)")
-    parser.add_argument("--sample", action="store_true",
-                        help="Randomly sample episodes from the test set instead of taking the first N sequentially")
+    parser.add_argument(
+        "--sample",
+        action="store_true",
+        help="Randomly sample episodes from the test set instead of taking the first N sequentially",
+    )
     parser.add_argument("--list-strategies", action="store_true",
                         help="List available strategies and exit")
     args = parser.parse_args()
@@ -487,9 +630,15 @@ def main():
         return
 
     try:
-        asyncio.run(run(args.url, args.strategy, args.episodes,
-                        verbose=not args.quiet, suffix=args.suffix,
-                        sample=args.sample))
+        asyncio.run(run(
+            args.url,
+            args.strategy,
+            args.episodes,
+            verbose=not args.quiet,
+            suffix=args.suffix,
+            sample=args.sample,
+            provider=args.provider,
+        ))
     except ConnectionRefusedError:
         print(f"Could not connect to {args.url}. Is the server running?",
               file=sys.stderr)
