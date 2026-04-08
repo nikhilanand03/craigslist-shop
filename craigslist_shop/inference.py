@@ -35,10 +35,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from craigslist_shop.client import CraigslistShopEnv  # noqa: E402
 from craigslist_shop.models import CraigslistShopAction  # noqa: E402
 
-# ── Config ────────────────────────────────────────────────────────────────
-API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY", "")
+# ── Config — variable names and defaults match hackathon checklist exactly ─
+HF_TOKEN = os.getenv("HF_TOKEN")                                         # no default
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")                         # optional
 ENV_URL = os.getenv("ENV_URL", "http://localhost:8000")
 
 BENCHMARK = "craigslist_shop"
@@ -202,7 +203,7 @@ async def run_episode(
 
 # ── Main ──────────────────────────────────────────────────────────────────
 async def main() -> None:
-    llm = OpenAI(api_key=API_KEY, base_url=API_BASE_URL)
+    llm = OpenAI(api_key=HF_TOKEN, base_url=API_BASE_URL)
 
     async with CraigslistShopEnv(base_url=ENV_URL) as env:
         for task in TASKS:
