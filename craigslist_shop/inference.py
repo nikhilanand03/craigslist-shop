@@ -44,8 +44,6 @@ ENV_URL = os.getenv("ENV_URL", "http://localhost:8000")
 
 BENCHMARK = "craigslist_shop"
 MAX_STEPS = 20
-_SCORE_MIN = 0.01  # scores must be strictly > 0 (open interval requirement)
-_SCORE_MAX = 0.99  # scores must be strictly < 1
 
 # 3 tasks — one per difficulty band (satisfies hackathon min-3-tasks requirement)
 TASKS = [
@@ -186,13 +184,13 @@ async def run_episode(
             log_step(step, action_str, step_reward, result.done, error_str)
 
             if result.done:
-                # Clamp score to open interval (0, 1) as required by hackathon spec
-                score = min(_SCORE_MAX, max(_SCORE_MIN, step_reward))
+                # Clamp score to [0, 1] as required by hackathon spec
+                score = min(1.0, max(0.0, step_reward))
                 success = obs.outcome == "sold"
                 break
 
     except Exception:
-        log_end(success=False, steps=step, score=_SCORE_MIN, rewards=rewards or [_SCORE_MIN])
+        log_end(success=False, steps=step, score=0.0, rewards=rewards or [0.0])
         raise
 
     log_end(success=success, steps=step, score=score, rewards=rewards or [0.0])
