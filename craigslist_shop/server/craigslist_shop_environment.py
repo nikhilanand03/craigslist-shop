@@ -81,6 +81,21 @@ class CraigslistShopEnvironment(Environment):
                 self._task_splits[split] = []
         self._tasks = self._task_splits.get("train", [])
 
+        # Pre-compute difficulty buckets from train tasks.
+        # Difficulty is based on buyer_target_price / listed_price ratio:
+        #   easy   >= 0.80  (buyer willing to pay near list price)
+        #   medium  0.65–0.80
+        #   hard   < 0.65  (aggressive lowballer)
+        def _ratio(t: dict) -> float:
+            listed = t["item"].get("listed_price", 0)
+            target = t["item"].get("buyer_target_price", 0)
+            return target / listed if listed > 0 else 0.0
+
+        train_tasks = self._task_splits.get("train", [])
+        self._task_splits["easy"] = [t for t in train_tasks if _ratio(t) >= 0.80]
+        self._task_splits["medium"] = [t for t in train_tasks if 0.65 <= _ratio(t) < 0.80]
+        self._task_splits["hard"] = [t for t in train_tasks if _ratio(t) < 0.65]
+
         # Per-episode state (set on reset)
         self._rng: np.random.Generator = np.random.default_rng()
         self._sm: StateMachine | None = None

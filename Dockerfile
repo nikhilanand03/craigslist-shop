@@ -1,0 +1,53 @@
+# Craigslist Shop — root Dockerfile
+# Builds the FastAPI negotiation server and makes inference.py available at root.
+#
+# Usage:
+#   docker build -t craigslist_shop .
+#   docker run -p 8000:8000 craigslist_shop
+
+ARG BASE_IMAGE=ghcr.io/meta-pytorch/openenv-base:latest
+FROM ${BASE_IMAGE} AS builder
+
+WORKDIR /app
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends git && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy the environment package (craigslist_shop/) into /app/env
+COPY craigslist_shop/ /app/env/
+
+WORKDIR /app/env
+
+# Ensure uv is available
+RUN if ! command -v uv >/dev/null 2>&1; then \
+        curl -LsSf https://astral.sh/uv/install.sh | sh && \
+        mv /root/.local/bin/uv /usr/local/bin/uv && \
+        mv /root/.local/bin/uvx /usr/local/bin/uvx; \
+    fi
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    if [ -f uv.lock ]; then \
+        uv sync --frozen --no-editable; \
+    else \
+        uv sync --no-editable; \
+    fi
+
+# Final runtime stage
+FROM ${BASE_IMAGE}
+
+WORKDIR /app
+
+COPY --from=builder /app/env/.venv /app/.venv
+COPY --from=builder /app/env /app/env
+
+# Copy inference.py to /app so it's accessible at container root
+COPY inference.py /app/inference.py
+
+ENV PATH="/app/.venv/bin:$PATH"
+ENV PYTHONPATH="/app/env:/app:$PYTHONPATH"
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+CMD ["sh", "-c", "cd /app/env && uvicorn server.app:app --host 0.0.0.0 --port 8000"]

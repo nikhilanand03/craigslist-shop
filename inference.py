@@ -4,7 +4,7 @@ Baseline inference script for the Craigslist Shop negotiation environment.
 
 Runs a negotiation agent against 3 task difficulty levels:
   - easy_negotiation   buyer target >= 80% of listed price
-  - medium_negotiation buyer target 65-80% of listed price
+  - medium_negotiation buyer target 65–80% of listed price
   - hard_negotiation   buyer target < 65% of listed price
 
 Environment variables:
@@ -13,10 +13,10 @@ Environment variables:
   HF_TOKEN       HuggingFace / API key
   ENV_URL        Environment server URL (default: http://localhost:8000)
 
-STDOUT FORMAT
+STDOUT FORMAT (required by evaluator)
   [START] task=<name> env=craigslist_shop model=<model>
   [STEP]  step=<n> action=<str> reward=<0.00> done=<true|false> error=<msg|null>
-  [END]   success=<true|false> steps=<n> score=<0.00> rewards=<r1,r2,...,rn>
+  [END]   success=<true|false> steps=<n> score=<0.00> rewards=<r1,r2,...>
 """
 
 import asyncio
@@ -28,9 +28,12 @@ from typing import Optional
 
 from openai import OpenAI
 
-# In Docker the package is installed via uv sync (no-op).
-# In development, add the repo root so `craigslist_shop` is findable as a package.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# Support running from repo root (dev) or installed in Docker.
+# client.py uses relative imports, so the whole package must be importable —
+# add repo root so `craigslist_shop` is found as a package directory.
+_repo_root = str(Path(__file__).resolve().parent)
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
 
 from craigslist_shop.client import CraigslistShopEnv  # noqa: E402
 from craigslist_shop.models import CraigslistShopAction  # noqa: E402
@@ -45,7 +48,7 @@ ENV_URL = os.getenv("ENV_URL", "http://localhost:8000")
 BENCHMARK = "craigslist_shop"
 MAX_STEPS = 20
 
-# 3 tasks — one per difficulty band (satisfies hackathon min-3-tasks requirement)
+# 3 tasks — one per difficulty band (required by hackathon: min 3 tasks with graders)
 TASKS = [
     {"name": "easy_negotiation",   "split": "easy"},
     {"name": "medium_negotiation", "split": "medium"},
@@ -71,23 +74,27 @@ Respond with a JSON object only (no markdown fences, no extra text):
 }
 """
 
-# ── Logging helpers (exact spec format) ──────────────────────────────────
-def log_start(task: str, env: str, model: str) -> None:
-    print(f"[START] task={task} env={env} model={model}", flush=True)
+# ── Logging helpers ───────────────────────────────────────────────────────
+def log_start(task: str, model: str) -> None:
+    print(f"[START] task={task} env={BENCHMARK} model={model}", flush=True)
 
 
 def log_step(step: int, action: str, reward: float, done: bool,
              error: Optional[str] = None) -> None:
-    error_val = error if error else "null"
-    done_val = str(done).lower()
-    print(f"[STEP] step={step} action={action} reward={reward:.2f} "
-          f"done={done_val} error={error_val}", flush=True)
+    print(
+        f"[STEP] step={step} action={action} reward={reward:.2f} "
+        f"done={str(done).lower()} error={error or 'null'}",
+        flush=True,
+    )
 
 
 def log_end(success: bool, steps: int, score: float, rewards: list) -> None:
     rewards_str = ",".join(f"{r:.2f}" for r in rewards) if rewards else "0.00"
-    print(f"[END] success={str(success).lower()} steps={steps} "
-          f"score={score:.2f} rewards={rewards_str}", flush=True)
+    print(
+        f"[END] success={str(success).lower()} steps={steps} "
+        f"score={score:.2f} rewards={rewards_str}",
+        flush=True,
+    )
 
 
 # ── Action parsing ────────────────────────────────────────────────────────
@@ -120,10 +127,10 @@ async def run_episode(
 ) -> float:
     """
     Run one negotiation episode.
-    Emits [START], one [STEP] per turn, and [END] — always, even on exception.
-    Returns the final score clamped to [0, 1].
+    Emits [START], per-turn [STEP], and final [END] log lines.
+    Returns the final score (reward = sale_price / listed_price, or 0 on walkaway).
     """
-    log_start(task_name, BENCHMARK, MODEL_NAME)
+    log_start(task_name, MODEL_NAME)
 
     result = await env.reset(task_index=0, split=split)
     obs = result.observation
@@ -184,12 +191,11 @@ async def run_episode(
             log_step(step, action_str, step_reward, result.done, error_str)
 
             if result.done:
-                # Clamp score to [0, 1] as required by hackathon spec
-                score = min(1.0, max(0.0, step_reward))
+                score = step_reward
                 success = obs.outcome == "sold"
                 break
 
-    except Exception:
+    except Exception as exc:
         log_end(success=False, steps=step, score=0.0, rewards=rewards or [0.0])
         raise
 
