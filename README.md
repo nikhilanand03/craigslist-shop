@@ -45,47 +45,37 @@ pip install -r requirements.txt
 
 ### Configure API Keys
 
-Create a `key.json` in the repo root. You can use either **OpenAI** or **Azure OpenAI**:
+Set your LLM API keys as environment variables. You can use either **OpenAI** or **Azure OpenAI**:
 
-**Option A: OpenAI**
+```bash
+# Option A: OpenAI
+export OPENAI_API_KEY="sk-..."
+export OPENAI_MODEL="gpt-4o"              # optional, defaults to gpt-4o
+
+# Option B: Azure OpenAI
+export AZURE_OPENAI_API_KEY="your-key"
+export AZURE_OPENAI_ENDPOINT="https://your-endpoint.openai.azure.com/"
+export AZURE_OPENAI_MODEL="gpt-4o"        # optional, defaults to gpt-4o
+```
+
+If both are set, OpenAI takes priority over Azure.
+
+**For HuggingFace Spaces deployment**, add these as secrets in your Space settings (Settings → Variables and secrets). This keeps your keys encrypted and invisible in the public repo.
+
+You can also use a `key.json` file for local development (it's in `.gitignore`):
 ```json
 {
     "openai_api_key": "sk-...",
     "openai_model": "gpt-4o"
 }
 ```
-
-**Option B: Azure OpenAI**
+or
 ```json
 {
     "azure_openai_endpoint": "https://your-endpoint.openai.azure.com/",
     "azure_openai_api_key": "your-api-key"
 }
 ```
-
-If both are present, OpenAI takes priority over Azure.
-
-You can also set environment variables instead of (or in addition to) `key.json`:
-
-```bash
-# OpenAI
-export OPENAI_API_KEY="sk-..."
-export OPENAI_MODEL="gpt-4o"          # optional, defaults to gpt-4o
-
-# Or Azure OpenAI
-export AZURE_OPENAI_API_KEY="your-key"
-export AZURE_OPENAI_ENDPOINT="https://your-endpoint.openai.azure.com/"
-export AZURE_OPENAI_MODEL="gpt-4o"    # optional, defaults to gpt-4o
-```
-
-Values in `key.json` take priority over environment variables. If neither is set, the scripts will show an error.
-
-Copy `key.json` into the environment folder for Docker access:
-```bash
-cp key.json craigslist_shop/key.json
-```
-
-> `key.json` is already in `.gitignore` and will not be committed.
 
 ### Build and Run the Docker Container
 
