@@ -30,10 +30,7 @@ class CraigslistShopEnv(
     """
 
     def _step_payload(self, action: CraigslistShopAction) -> Dict:
-        payload = {
-            "message": action.message,
-            "action_type": action.action_type,
-        }
+        payload = {"message": action.message}
         if action.price is not None:
             payload["price"] = action.price
         return payload

@@ -40,29 +40,42 @@ conda create -n craigslist_shop python=3.11
 conda activate craigslist_shop
 
 # Install dependencies
-pip install uv
-uv pip install openenv-core
+pip install -r requirements.txt
 ```
 
 ### Configure API Keys
 
-Create a `key.json` in the repo root (and inside `craigslist_shop/` for Docker):
+Set your LLM API keys as environment variables. You can use either **OpenAI** or **Azure OpenAI**:
 
+```bash
+# Option A: OpenAI
+export OPENAI_API_KEY="sk-..."
+export OPENAI_MODEL="gpt-4o"              # optional, defaults to gpt-4o
+
+# Option B: Azure OpenAI
+export AZURE_OPENAI_API_KEY="your-key"
+export AZURE_OPENAI_ENDPOINT="https://your-endpoint.openai.azure.com/"
+export AZURE_OPENAI_MODEL="gpt-4o"        # optional, defaults to gpt-4o
+```
+
+If both are set, OpenAI takes priority over Azure.
+
+**For HuggingFace Spaces deployment**, add these as secrets in your Space settings (Settings → Variables and secrets). This keeps your keys encrypted and invisible in the public repo.
+
+You can also use a `key.json` file for local development (it's in `.gitignore`):
+```json
+{
+    "openai_api_key": "sk-...",
+    "openai_model": "gpt-4o"
+}
+```
+or
 ```json
 {
     "azure_openai_endpoint": "https://your-endpoint.openai.azure.com/",
-    "azure_openai_api_key": "your-api-key",
-    "azure_openai_planner_deployment": "gpt-4o",
-    "azure_openai_htmlgen_deployment": "gpt-4o"
+    "azure_openai_api_key": "your-api-key"
 }
 ```
-
-Copy it into the environment folder for Docker access:
-```bash
-cp key.json craigslist_shop/key.json
-```
-
-> `key.json` is already in `.gitignore` and will not be committed.
 
 ### Build and Run the Docker Container
 
@@ -87,9 +100,11 @@ cd craigslist_shop
 python -m server.app
 ```
 
-## Evaluating Agents
+## Demo
 
-Use `test_agent.py` to evaluate built-in strategies against the test set:
+The demo runs built-in seller strategies against the environment and produces evaluation metrics and plots. This is the quickest way to see the environment in action.
+
+### Run a Single Strategy
 
 ```bash
 cd craigslist_shop
@@ -110,7 +125,7 @@ python test_agent.py --strategy skilled_seller --episodes 10 --suffix experiment
 python test_agent.py --strategy pushover --episodes 20 --quiet
 ```
 
-### Built-in Strategies
+### Sample Strategies
 
 | Strategy | Description |
 |----------|-------------|
@@ -120,16 +135,9 @@ python test_agent.py --strategy pushover --episodes 20 --quiet
 | `haggler` | Enjoys negotiation, willing to go down to 70% |
 | `random` | Chaotic, unpredictable pricing each turn |
 
-### Output
+### Run the Full Demo (Sample Strategies)
 
-Results are saved to `runs/` (or `runs_{suffix}/`) as JSON files containing:
-- Per-episode metrics (reward, outcome, sale price, listed price, turns)
-- Full conversation history for each episode
-- Aggregate statistics (avg reward, sale rate, price retention, per-category breakdown)
-
-### Running a Full Analysis
-
-Use `run_analysis.sh` to evaluate all built-in strategies and generate comparison plots:
+Use `run_analysis.sh` to evaluate all sample strategies and generate comparison plots in one go:
 
 ```bash
 # Run all 5 strategies x 10 episodes, generate plots
@@ -140,10 +148,17 @@ bash run_analysis.sh experiment_v2
 ```
 
 This will:
-1. Run each strategy (`pushover`, `full_price`, `skilled_seller`, `haggler`, `random`) for 10 episodes on the test set
+1. Run each sample strategy (`pushover`, `full_price`, `skilled_seller`, `haggler`, `random`) for 10 episodes on the test set
 2. Save per-strategy results to `runs_{suffix}/`
-3. Generate `analysis/strategy_evaluation.png` with three charts: average reward (with std error bars), sale rate, and price retention per strategy
+3. Generate `analysis/strategy_evaluation_{suffix}.png` with three charts: average reward (with std error bars), sale rate, and price retention per strategy
 4. Print a summary table to the terminal
+
+### Demo Output
+
+Results are saved to `runs/` (or `runs_{suffix}/`) as JSON files containing:
+- Per-episode metrics (reward, outcome, sale price, listed price, turns)
+- Full conversation history for each episode
+- Aggregate statistics (avg reward, sale rate, price retention, per-category breakdown)
 
 ## Building Your Own Agent
 
@@ -157,14 +172,12 @@ Your agent interacts with the environment via HTTP. Each step, the agent receive
 - `conversation_history` — full dialogue so far
 
 **Action fields:**
-- `message` (str) — your natural language response
-- `action_type` — one of `counter_offer`, `accept`, `reject`
-- `price` (float, optional) — the price you're offering (required for `counter_offer`)
+- `message` (str) — your natural language response to the buyer
+- `price` (float, optional) — the price you're offering
 
-The episode ends when:
+The agent can only negotiate — it sends messages and prices. The buyer decides the outcome. The episode ends when:
 - The buyer accepts a price (`[ACCEPT $X.XX]`)
 - The buyer walks away (`[WALKAWAY]`)
-- The agent calls `reject`
 - The hard turn cap (20) is reached
 
 ## Generating Personas

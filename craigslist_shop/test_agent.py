@@ -38,15 +38,15 @@ _JSON_FORMAT_INSTRUCTIONS = """
 You must respond with a JSON object (no markdown, no extra text):
 
 {
-  "message": "Your natural language response to the customer",
-  "action_type": "counter_offer | accept | reject",
-  "price": null
+  "message": "Your natural language response to the buyer",
+  "price": 100.00
 }
 
-Action types:
-- "counter_offer": Negotiate with the customer. Set "price" to the dollar amount you are offering.
-- "accept": Agree to the customer's price and complete the sale. Set "price" to the agreed price.
-- "reject": Refuse and end the interaction (customer walks away, you get 0 reward).
+- "message": What you say to the buyer. Negotiate, persuade, justify your price.
+- "price": The price you are currently offering. Always include this.
+
+The buyer will decide whether to accept your price, counter, or walk away.
+You cannot force a sale — you can only negotiate.
 
 Always respond with valid JSON only, no other text.
 """
@@ -61,9 +61,9 @@ You would rather give a huge discount than risk losing a buyer.
 {_JSON_FORMAT_INSTRUCTIONS}
 
 Rules:
-- If a buyer proposes ANY price, immediately accept it with "accept".
+- If a buyer proposes ANY price, immediately match it in your next response.
 - If the buyer hasn't proposed a price, offer 20% below your listed price.
-- Never reject. Never push back. Always be warm and accommodating.
+- Never push back. Always be warm and accommodating.
 """
 
 # ── Full price or nothing ─────────────────────────────────────────────────
@@ -74,10 +74,8 @@ your item is worth every penny of the listed price.
 {_JSON_FORMAT_INSTRUCTIONS}
 
 Rules:
-- Always offer the full listed price. Never set "price" below the listed price.
-- If a buyer asks for a discount, politely decline ONCE with a counter_offer
-  at full price. If they push back again, use "reject".
-- If the buyer agrees to full price, use "accept" immediately.
+- Always set "price" to the full listed price. Never go below it.
+- If a buyer asks for a discount, politely decline and restate the listed price.
 - Be polite but absolutely firm. No exceptions.
 """
 
@@ -95,9 +93,6 @@ Rules:
   NEVER go below 90% of the listed price.
 - Use persuasion: mention other interested buyers, highlight quality, create
   urgency ("I have someone else coming to look at it tomorrow").
-- If the buyer's offer is within 10% of listed price, accept it.
-- Only reject if the buyer is being unreasonable (offering less than 50%)
-  after you've already countered twice.
 - Be conversational, confident, and friendly.
 """
 
@@ -115,8 +110,7 @@ Rules:
   listed price.
 - Match the buyer's energy — if they're friendly, be friendly. If they're
   aggressive, hold firmer.
-- Accept any offer above 70% of listed price after at least 2 rounds.
-- Never reject — always counter. You'd rather sell cheap than not sell.
+- You'd rather sell cheap than not sell. Always keep the conversation going.
 """
 
 # ── Random ────────────────────────────────────────────────────────────────
@@ -130,7 +124,6 @@ Rules:
 - Each turn, pick a random approach:
   - Sometimes demand MORE than listed price.
   - Sometimes offer a huge discount for no reason.
-  - Sometimes reject perfectly reasonable offers.
   - Sometimes accept absurdly low offers.
 - Your prices should be erratic. No pattern.
 - Your personality shifts every message.
@@ -173,9 +166,9 @@ After this analysis, produce your action.
 """
 
 STRATEGY_DESCRIPTIONS = {
-    "pushover": "Always accepts the buyer's first offer, never negotiates",
-    "full_price": "Never discounts, rejects if buyer pushes back",
-    "skilled_seller": "Discounts up to 10%, uses persuasion, tries to close everyone",
+    "pushover": "Always matches the buyer's price, never negotiates",
+    "full_price": "Never discounts, holds firm at listed price",
+    "skilled_seller": "Discounts up to 10%, uses persuasion to close",
     "haggler": "Enjoys negotiation, willing to go down to 70% of listed price",
     "random": "Random/chaotic action each step",
     "strategic_reasoner": "Reasons about buyer type + offer trajectory before each move (best with --provider claude)",
@@ -258,9 +251,14 @@ def build_claude_prompt(strategy_prompt: str, obs, history: list[dict]) -> str:
 # ---------------------------------------------------------------------------
 
 def load_keys() -> dict:
-    key_path = Path(__file__).resolve().parent.parent / "key.json"
-    with open(key_path) as f:
-        return json.load(f)
+    for p in [
+        Path(__file__).resolve().parent.parent / "key.json",
+        Path(__file__).resolve().parent / "key.json",
+    ]:
+        if p.exists():
+            with open(p) as f:
+                return json.load(f)
+    return {}
 
 
 def parse_agent_response(text: str) -> CraigslistShopAction:
@@ -274,14 +272,10 @@ def parse_agent_response(text: str) -> CraigslistShopAction:
     try:
         data = json.loads(text)
     except json.JSONDecodeError:
-        return CraigslistShopAction(
-            message=text[:500],
-            action_type="counter_offer",
-        )
+        return CraigslistShopAction(message=text[:500])
 
     return CraigslistShopAction(
         message=data.get("message") or "",
-        action_type=data.get("action_type", "counter_offer"),
         price=data.get("price"),
     )
 
@@ -390,7 +384,6 @@ async def run_episode(
                 print(f"{RED}    ERROR: {e}{RESET}")
             agent_text = json.dumps({
                 "message": f"The price is ${obs.listed_price:.2f}.",
-                "action_type": "counter_offer",
                 "price": obs.listed_price,
             })
 
@@ -399,7 +392,7 @@ async def run_episode(
 
         if verbose:
             price_str = f" @ ${action.price:.2f}" if action.price is not None else ""
-            print(f"\n{GREEN}{BOLD}  [AGENT → ENV] {action.action_type}{price_str}{RESET}")
+            print(f"\n{GREEN}{BOLD}  [AGENT → ENV]{price_str}{RESET}")
             print(f"{GREEN}    \"{action.message}\"{RESET}")
 
         result = await env.step(action)

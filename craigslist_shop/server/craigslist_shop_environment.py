@@ -20,7 +20,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import numpy as np
-from openai import AzureOpenAI
+from openai import AzureOpenAI, OpenAI
 
 from openenv.core.env_server.interfaces import Environment
 from openenv.core.env_server.types import State
@@ -105,8 +105,8 @@ class CraigslistShopEnvironment(Environment):
         self._current_offer_price: float | None = None
         self._terminated: bool = False
 
-        # Customer LLM client
-        self._customer_llm: AzureOpenAI | None = None
+        # Customer LLM client (AzureOpenAI or OpenAI)
+        self._customer_llm: AzureOpenAI | OpenAI | None = None
         self._customer_model: str = "gpt-4o"
 
     # ── Key loading ──────────────────────────────────────────────────────
@@ -126,6 +126,15 @@ class CraigslistShopEnvironment(Environment):
 
     def _init_customer_llm(self) -> None:
         keys = self._load_keys()
+
+        # Option 1: Standard OpenAI
+        openai_key = keys.get("openai_api_key", os.environ.get("OPENAI_API_KEY", ""))
+        if openai_key:
+            self._customer_llm = OpenAI(api_key=openai_key)
+            self._customer_model = keys.get("openai_model", os.environ.get("OPENAI_MODEL", "gpt-4o"))
+            return
+
+        # Option 2: Azure OpenAI
         api_key = keys.get("azure_openai_api_key", os.environ.get("AZURE_OPENAI_API_KEY", ""))
         endpoint = keys.get("azure_openai_endpoint", os.environ.get("AZURE_OPENAI_ENDPOINT", ""))
         if api_key and endpoint:
@@ -315,28 +324,16 @@ class CraigslistShopEnvironment(Environment):
     # ── Step ─────────────────────────────────────────────────────────────
 
     def step(self, action: CraigslistShopAction) -> CraigslistShopObservation:
+        """
+        Process one turn. The agent sends a message (and optional price).
+        The customer LLM responds and may [ACCEPT] or [WALKAWAY].
+        """
         if self._terminated:
             return self._make_observation(
                 system_msg="Episode is over.", done=True
             )
 
         self._state.step_count += 1
-        action_type = action.action_type
-
-        if action_type == "counter_offer":
-            return self._handle_counter_offer(action)
-        elif action_type == "accept":
-            return self._handle_accept(action)
-        elif action_type == "reject":
-            return self._handle_reject(action)
-        else:
-            return self._make_observation(
-                system_msg=f"Unknown action type: {action_type}"
-            )
-
-    # ── Action handlers ──────────────────────────────────────────────────
-
-    def _handle_counter_offer(self, action: CraigslistShopAction) -> CraigslistShopObservation:
         self._negotiation_turn += 1
 
         if action.price is not None:
@@ -362,38 +359,6 @@ class CraigslistShopEnvironment(Environment):
             return self._complete_sale(accepted_price, clean_msg)
 
         return self._make_observation(customer_msg=clean_msg)
-
-    def _handle_accept(self, action: CraigslistShopAction) -> CraigslistShopObservation:
-        """Agent accepts — complete the sale at the last discussed price."""
-        self._conversation.append({"role": "user", "content": action.message})
-
-        # Determine sale price: explicit price > last offer > listed price
-        if action.price is not None:
-            sale_price = action.price
-        elif self._current_offer_price is not None:
-            sale_price = self._current_offer_price
-        else:
-            item = self._current_task.get("item", {}) if self._current_task else {}
-            sale_price = item.get("listed_price", 0.0)
-
-        # Let the customer know and get their confirmation
-        raw_response = self._get_customer_response(action.message)
-        clean_msg, customer_action, accepted_price = self._parse_customer_tags(raw_response)
-        self._conversation.append({"role": "assistant", "content": clean_msg})
-
-        if customer_action == "walkaway":
-            return self._handle_walkaway(clean_msg)
-
-        # If customer accepted with a specific price, use that
-        if customer_action == "accept" and accepted_price is not None:
-            sale_price = accepted_price
-
-        return self._complete_sale(sale_price, clean_msg)
-
-    def _handle_reject(self, action: CraigslistShopAction) -> CraigslistShopObservation:
-        """Agent rejects the customer — end negotiation."""
-        self._conversation.append({"role": "user", "content": action.message})
-        return self._handle_walkaway("Alright, no problem. Thanks anyway.")
 
     # ── Walkaway ─────────────────────────────────────────────────────────
 
