@@ -2,11 +2,13 @@
 """
 LLM-powered test agent for the Craigslist Shop negotiation environment.
 
-Uses Azure OpenAI (gpt-4o) to decide actions. Reads keys from key.json.
-Supports multiple agent strategies for evaluation.
+Supports two providers:
+  --provider azure   Use Azure OpenAI (default, requires key.json)
+  --provider claude  Use local Claude via `claude -p`
 
 Usage:
     python test_agent.py --strategy skilled_seller --episodes 10
+    python test_agent.py --strategy strategic_reasoner --provider claude --episodes 5
     python test_agent.py --strategy pushover --episodes 5 --quiet
     python test_agent.py --list-strategies
     python test_agent.py --strategy pushover --episodes 5 --suffix craigs_shop
@@ -18,13 +20,12 @@ Usage:
 import argparse
 import asyncio
 import json
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from openai import AzureOpenAI
 
 from craigslist_shop.client import CraigslistShopEnv
 from craigslist_shop.models import CraigslistShopAction
@@ -37,15 +38,15 @@ _JSON_FORMAT_INSTRUCTIONS = """
 You must respond with a JSON object (no markdown, no extra text):
 
 {
-  "message": "Your natural language response to the customer",
-  "action_type": "counter_offer | accept | reject",
-  "price": null
+  "message": "Your natural language response to the buyer",
+  "price": 100.00
 }
 
-Action types:
-- "counter_offer": Negotiate with the customer. Set "price" to the dollar amount you are offering.
-- "accept": Agree to the customer's price and complete the sale. Set "price" to the agreed price.
-- "reject": Refuse and end the interaction (customer walks away, you get 0 reward).
+- "message": What you say to the buyer. Negotiate, persuade, justify your price.
+- "price": The price you are currently offering. Always include this.
+
+The buyer will decide whether to accept your price, counter, or walk away.
+You cannot force a sale — you can only negotiate.
 
 Always respond with valid JSON only, no other text.
 """
@@ -60,9 +61,9 @@ You would rather give a huge discount than risk losing a buyer.
 {_JSON_FORMAT_INSTRUCTIONS}
 
 Rules:
-- If a buyer proposes ANY price, immediately accept it with "accept".
+- If a buyer proposes ANY price, immediately match it in your next response.
 - If the buyer hasn't proposed a price, offer 20% below your listed price.
-- Never reject. Never push back. Always be warm and accommodating.
+- Never push back. Always be warm and accommodating.
 """
 
 # ── Full price or nothing ─────────────────────────────────────────────────
@@ -73,10 +74,8 @@ your item is worth every penny of the listed price.
 {_JSON_FORMAT_INSTRUCTIONS}
 
 Rules:
-- Always offer the full listed price. Never set "price" below the listed price.
-- If a buyer asks for a discount, politely decline ONCE with a counter_offer
-  at full price. If they push back again, use "reject".
-- If the buyer agrees to full price, use "accept" immediately.
+- Always set "price" to the full listed price. Never go below it.
+- If a buyer asks for a discount, politely decline and restate the listed price.
 - Be polite but absolutely firm. No exceptions.
 """
 
@@ -94,9 +93,6 @@ Rules:
   NEVER go below 90% of the listed price.
 - Use persuasion: mention other interested buyers, highlight quality, create
   urgency ("I have someone else coming to look at it tomorrow").
-- If the buyer's offer is within 10% of listed price, accept it.
-- Only reject if the buyer is being unreasonable (offering less than 50%)
-  after you've already countered twice.
 - Be conversational, confident, and friendly.
 """
 
@@ -114,8 +110,7 @@ Rules:
   listed price.
 - Match the buyer's energy — if they're friendly, be friendly. If they're
   aggressive, hold firmer.
-- Accept any offer above 70% of listed price after at least 2 rounds.
-- Never reject — always counter. You'd rather sell cheap than not sell.
+- You'd rather sell cheap than not sell. Always keep the conversation going.
 """
 
 # ── Random ────────────────────────────────────────────────────────────────
@@ -129,18 +124,54 @@ Rules:
 - Each turn, pick a random approach:
   - Sometimes demand MORE than listed price.
   - Sometimes offer a huge discount for no reason.
-  - Sometimes reject perfectly reasonable offers.
   - Sometimes accept absurdly low offers.
 - Your prices should be erratic. No pattern.
 - Your personality shifts every message.
 """
 
+# ── Strategic Reasoner (A + C: chain-of-thought + buyer persona inference) ─
+STRATEGIES["strategic_reasoner"] = f"""\
+You are a skilled Craigslist seller who thinks analytically before every response.
+
+Before deciding your action, silently work through this analysis:
+
+1. BUYER CLASSIFICATION — Based on their opening bid vs listed price and tone:
+   - Aggressive lowballer (opened <50% of listed): They're probing. Hold firm —
+     rewarding the opening bid anchors the whole negotiation low.
+   - Budget-constrained (opened 50–75%): They want the item but have real limits.
+     Find their ceiling with small, patient steps rather than a big concession.
+   - Near-reasonable (opened 75%+): They're already close. Close efficiently —
+     over-negotiating risks losing a buyer who was nearly ready to pay.
+   - Impatient or clipped tone: They want a quick answer. Be direct and decisive.
+
+2. OFFER TRAJECTORY — If multiple offers have been exchanged, look for the pattern:
+   - Rapidly converging bids (e.g. $70 → $85 → $95): They're near their ceiling.
+     Hold or make only a tiny move — don't race them to the bottom.
+   - Slow movement or stalling: One meaningful concession can re-engage them.
+     Make it feel earned ("That's the best I can do").
+   - Buyer hasn't moved at all: Ask them to make the next move before you concede.
+
+3. WALK-AWAY SIGNAL DETECTION — Watch for: short clipped responses, phrases like
+   "that's all I have" or "forget it", no new counter-offer, repeating the same
+   number, or frustrated tone. If you detect these, weigh closing now vs. holding
+   and risking a 0-reward walkaway. A sale at 80% beats no sale.
+
+4. EXPECTED VALUE REASONING — Think in terms of outcomes:
+   - Closing at 85% of listed price is almost always better than gambling for 100%.
+   - But closing at 65% when the buyer had room is leaving real money behind.
+   - Use the buyer's signals to estimate their true ceiling, then target just below it.
+
+After this analysis, produce your action.
+{_JSON_FORMAT_INSTRUCTIONS}
+"""
+
 STRATEGY_DESCRIPTIONS = {
-    "pushover": "Always accepts the buyer's first offer, never negotiates",
-    "full_price": "Never discounts, rejects if buyer pushes back",
-    "skilled_seller": "Discounts up to 10%, uses persuasion, tries to close everyone",
+    "pushover": "Always matches the buyer's price, never negotiates",
+    "full_price": "Never discounts, holds firm at listed price",
+    "skilled_seller": "Discounts up to 10%, uses persuasion to close",
     "haggler": "Enjoys negotiation, willing to go down to 70% of listed price",
     "random": "Random/chaotic action each step",
+    "strategic_reasoner": "Reasons about buyer type + offer trajectory before each move (best with --provider claude)",
 }
 
 BLUE = "\033[94m"
@@ -154,10 +185,80 @@ BOLD = "\033[1m"
 RESET = "\033[0m"
 
 
+# ---------------------------------------------------------------------------
+# Claude provider
+# ---------------------------------------------------------------------------
+
+def call_claude(prompt: str) -> str:
+    """Invoke `claude -p` and return the response text."""
+    try:
+        result = subprocess.run(
+            ["claude", "-p", prompt],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except FileNotFoundError:
+        raise RuntimeError(
+            "claude CLI not found. Install Claude Code: https://claude.ai/code"
+        )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"claude -p failed (exit {result.returncode}): {result.stderr.strip()}"
+        )
+    return result.stdout.strip()
+
+
+def build_claude_prompt(strategy_prompt: str, obs, history: list[dict]) -> str:
+    """
+    Build a single prompt string for `claude -p`.
+
+    Serializes the full conversation history + current observation into one string.
+    claude -p is stateless, so we reconstruct full context on every turn.
+    """
+    # Serialize prior turns (skip the leading system message)
+    conv_parts = []
+    for msg in history:
+        if msg["role"] == "user":
+            conv_parts.append(f"[OBSERVATION]\n{msg['content']}")
+        elif msg["role"] == "assistant":
+            conv_parts.append(f"[YOUR PREVIOUS ACTION]\n{msg['content']}")
+    conv_section = "\n\n".join(conv_parts) if conv_parts else "(first turn — no prior history)"
+
+    obs_lines = [
+        f"Item: {obs.item_title} ({obs.item_category})",
+        f"Description: {obs.item_description[:400]}",
+        f"Listed price: ${obs.listed_price:.2f}",
+        f"Your last offered price: {'$' + f'{obs.current_offer_price:.2f}' if obs.current_offer_price else 'none yet'}",
+        f"Turn: {obs.turn}",
+    ]
+    if obs.system_message:
+        obs_lines.append(f"System: {obs.system_message}")
+    if obs.customer_message:
+        obs_lines.append(f"Buyer: {obs.customer_message}")
+    obs_text = "\n".join(obs_lines)
+
+    return (
+        f"{strategy_prompt}\n\n"
+        f"=== NEGOTIATION HISTORY ===\n{conv_section}\n\n"
+        f"=== CURRENT STATE ===\n{obs_text}\n\n"
+        "Respond with valid JSON only. No markdown fences, no extra text."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
 def load_keys() -> dict:
-    key_path = Path(__file__).resolve().parent.parent / "key.json"
-    with open(key_path) as f:
-        return json.load(f)
+    for p in [
+        Path(__file__).resolve().parent.parent / "key.json",
+        Path(__file__).resolve().parent / "key.json",
+    ]:
+        if p.exists():
+            with open(p) as f:
+                return json.load(f)
+    return {}
 
 
 def parse_agent_response(text: str) -> CraigslistShopAction:
@@ -171,14 +272,10 @@ def parse_agent_response(text: str) -> CraigslistShopAction:
     try:
         data = json.loads(text)
     except json.JSONDecodeError:
-        return CraigslistShopAction(
-            message=text[:500],
-            action_type="counter_offer",
-        )
+        return CraigslistShopAction(message=text[:500])
 
     return CraigslistShopAction(
         message=data.get("message") or "",
-        action_type=data.get("action_type", "counter_offer"),
         price=data.get("price"),
     )
 
@@ -198,14 +295,30 @@ def print_state(obs):
     print(f"{YELLOW}  └──────────────────────────────────────────────────────{RESET}")
 
 
-async def run_episode(env, client, model, strategy, episode_num, task_index=None, split="test", verbose=True):
+# ---------------------------------------------------------------------------
+# Episode runner
+# ---------------------------------------------------------------------------
+
+async def run_episode(
+    env,
+    client,
+    model: str,
+    strategy: str,
+    episode_num: int,
+    task_index=None,
+    split: str = "test",
+    verbose: bool = True,
+    provider: str = "azure",
+):
     """Run a single episode (one negotiation). Returns episode result dict."""
     system_prompt = STRATEGIES[strategy]
+    # messages tracks the conversation for the Azure path; also used to build
+    # claude prompts (we serialize history from messages[1:] each turn).
     messages = [{"role": "system", "content": system_prompt}]
 
     if verbose:
         print(f"\n{CYAN}{BOLD}{'=' * 70}{RESET}")
-        print(f"{CYAN}{BOLD}  EPISODE {episode_num}{RESET}")
+        print(f"{CYAN}{BOLD}  EPISODE {episode_num}  [{provider}]{RESET}")
         print(f"{CYAN}{BOLD}{'=' * 70}{RESET}")
 
     result = await env.reset(task_index=task_index, split=split)
@@ -254,19 +367,23 @@ async def run_episode(env, client, model, strategy, episode_num, task_index=None
                 print(f"{YELLOW}    {line}{RESET}")
 
         try:
-            completion = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                max_tokens=300,
-                temperature=0.7,
-            )
-            agent_text = completion.choices[0].message.content or ""
+            if provider == "claude":
+                # Build a single stateless prompt with full context and call claude -p
+                prompt = build_claude_prompt(system_prompt, obs, messages[1:])
+                agent_text = call_claude(prompt)
+            else:
+                completion = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    max_tokens=300,
+                    temperature=0.7,
+                )
+                agent_text = completion.choices[0].message.content or ""
         except Exception as e:
             if verbose:
                 print(f"{RED}    ERROR: {e}{RESET}")
             agent_text = json.dumps({
                 "message": f"The price is ${obs.listed_price:.2f}.",
-                "action_type": "counter_offer",
                 "price": obs.listed_price,
             })
 
@@ -275,7 +392,7 @@ async def run_episode(env, client, model, strategy, episode_num, task_index=None
 
         if verbose:
             price_str = f" @ ${action.price:.2f}" if action.price is not None else ""
-            print(f"\n{GREEN}{BOLD}  [AGENT → ENV] {action.action_type}{price_str}{RESET}")
+            print(f"\n{GREEN}{BOLD}  [AGENT → ENV]{price_str}{RESET}")
             print(f"{GREEN}    \"{action.message}\"{RESET}")
 
         result = await env.step(action)
@@ -317,20 +434,37 @@ async def run_episode(env, client, model, strategy, episode_num, task_index=None
     }
 
 
-async def run(base_url: str, strategy: str, num_episodes: int, verbose: bool, suffix: str | None = None, sample: bool = False):
-    keys = load_keys()
-    azure_endpoint = keys["azure_openai_endpoint"]
-    model = keys.get("azure_openai_planner_deployment", "gpt-4o")
+# ---------------------------------------------------------------------------
+# Main runner
+# ---------------------------------------------------------------------------
 
-    client = AzureOpenAI(
-        api_key=keys["azure_openai_api_key"],
-        azure_endpoint=azure_endpoint,
-        api_version="2024-12-01-preview",
-    )
+async def run(
+    base_url: str,
+    strategy: str,
+    num_episodes: int,
+    verbose: bool,
+    suffix: str | None = None,
+    sample: bool = False,
+    provider: str = "azure",
+):
+    # Azure path requires keys; Claude path does not
+    if provider == "azure":
+        keys = load_keys()
+        from openai import AzureOpenAI
+        client = AzureOpenAI(
+            api_key=keys["azure_openai_api_key"],
+            azure_endpoint=keys["azure_openai_endpoint"],
+            api_version="2024-12-01-preview",
+        )
+        model = keys.get("azure_openai_planner_deployment", "gpt-4o")
+    else:
+        client = None
+        model = "claude"
 
     print(f"\n{BOLD}{'=' * 80}{RESET}")
     print(f"{BOLD}  CRAIGSLIST SHOP NEGOTIATION EVALUATION{RESET}")
     print(f"{BOLD}{'=' * 80}{RESET}")
+    print(f"{DIM}  Provider:     {provider}{RESET}")
     print(f"{DIM}  Agent model:  {model}{RESET}")
     print(f"{DIM}  Strategy:     {strategy} — {STRATEGY_DESCRIPTIONS[strategy]}{RESET}")
     print(f"{DIM}  Episodes:     {num_episodes}{RESET}")
@@ -350,6 +484,7 @@ async def run(base_url: str, strategy: str, num_episodes: int, verbose: bool, su
             ep_result = await run_episode(
                 env, client, model, strategy, ep,
                 task_index=task_idx, split="test", verbose=verbose,
+                provider=provider,
             )
             episodes.append(ep_result)
 
@@ -393,7 +528,7 @@ async def run(base_url: str, strategy: str, num_episodes: int, verbose: bool, su
 
     # --- Print summary ---
     print(f"\n{BOLD}{'=' * 80}{RESET}")
-    print(f"{BOLD}  RESULTS — {strategy} × {num_episodes} episodes{RESET}")
+    print(f"{BOLD}  RESULTS — {strategy} ({provider}) × {num_episodes} episodes{RESET}")
     print(f"{BOLD}{'=' * 80}{RESET}")
     print(f"  Avg reward:          {avg_reward:.4f}  (std: {std_reward:.4f})")
     print(f"  Min / Max reward:    {min_reward:.4f} / {max_reward:.4f}")
@@ -428,11 +563,12 @@ async def run(base_url: str, strategy: str, num_episodes: int, verbose: bool, su
     runs_dir.mkdir(exist_ok=True)
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    batch_filename = f"{strategy}_{num_episodes}ep_{timestamp}.json"
+    batch_filename = f"{strategy}_{provider}_{num_episodes}ep_{timestamp}.json"
     batch_path = runs_dir / batch_filename
 
     batch_data = {
         "strategy": strategy,
+        "provider": provider,
         "strategy_description": STRATEGY_DESCRIPTIONS[strategy],
         "agent_model": model,
         "num_episodes": num_episodes,
@@ -459,17 +595,29 @@ async def run(base_url: str, strategy: str, num_episodes: int, verbose: bool, su
 def main():
     parser = argparse.ArgumentParser(description="LLM test agent for Craigslist Shop negotiation")
     parser.add_argument("--url", default="http://localhost:8000")
-    parser.add_argument("--strategy", default="skilled_seller",
-                        choices=list(STRATEGIES.keys()),
-                        help="Agent strategy / system prompt to use")
+    parser.add_argument(
+        "--provider",
+        default="azure",
+        choices=["azure", "claude"],
+        help="LLM provider for the seller agent (default: azure)",
+    )
+    parser.add_argument(
+        "--strategy",
+        default="skilled_seller",
+        choices=list(STRATEGIES.keys()),
+        help="Agent strategy / system prompt to use",
+    )
     parser.add_argument("--episodes", type=int, default=5,
                         help="Number of episodes to run (default: 5)")
     parser.add_argument("--quiet", action="store_true",
                         help="Suppress per-step output, show only summary")
     parser.add_argument("--suffix", default=None,
                         help="Suffix for the runs directory (e.g., --suffix v2 saves to runs_v2/)")
-    parser.add_argument("--sample", action="store_true",
-                        help="Randomly sample episodes from the test set instead of taking the first N sequentially")
+    parser.add_argument(
+        "--sample",
+        action="store_true",
+        help="Randomly sample episodes from the test set instead of taking the first N sequentially",
+    )
     parser.add_argument("--list-strategies", action="store_true",
                         help="List available strategies and exit")
     args = parser.parse_args()
@@ -482,9 +630,15 @@ def main():
         return
 
     try:
-        asyncio.run(run(args.url, args.strategy, args.episodes,
-                        verbose=not args.quiet, suffix=args.suffix,
-                        sample=args.sample))
+        asyncio.run(run(
+            args.url,
+            args.strategy,
+            args.episodes,
+            verbose=not args.quiet,
+            suffix=args.suffix,
+            sample=args.sample,
+            provider=args.provider,
+        ))
     except ConnectionRefusedError:
         print(f"Could not connect to {args.url}. Is the server running?",
               file=sys.stderr)
