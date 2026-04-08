@@ -62,12 +62,11 @@ Guidelines:
 - Make small concessions (3-5% at a time) only if the buyer pushes back.
 - Never go below 80% of the listed price.
 - If the buyer's offer is within 10% of listed price, accept immediately.
-- Use "reject" only if the buyer is completely unreasonable after 3+ rounds.
+- If the buyer is completely unreasonable after 3+ rounds, stop negotiating and walk away.
 
 Respond with a JSON object only (no markdown fences, no extra text):
 {
   "message": "Your natural language response to the buyer",
-  "action_type": "counter_offer | accept | reject",
   "price": <float or null>
 }
 """
@@ -103,13 +102,11 @@ def parse_action(text: str, listed_price: float) -> CraigslistShopAction:
         data = json.loads(text)
         return CraigslistShopAction(
             message=data.get("message", ""),
-            action_type=data.get("action_type", "counter_offer"),
             price=data.get("price"),
         )
     except (json.JSONDecodeError, KeyError):
         return CraigslistShopAction(
             message=text[:300] if text else "I can do that price.",
-            action_type="counter_offer",
             price=listed_price,
         )
 
@@ -168,14 +165,13 @@ async def run_episode(
                 error_str = str(e)[:120]
                 agent_text = json.dumps({
                     "message": f"The price is ${obs.listed_price:.2f}.",
-                    "action_type": "counter_offer",
                     "price": obs.listed_price,
                 })
 
             messages.append({"role": "assistant", "content": agent_text})
             action = parse_action(agent_text, obs.listed_price)
 
-            action_str = action.action_type
+            action_str = "counter_offer"
             if action.price is not None:
                 action_str += f"(${action.price:.2f})"
 
