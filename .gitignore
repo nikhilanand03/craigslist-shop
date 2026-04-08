@@ -3,3 +3,4 @@ runs*
 craigslist_shop/key.json
 extract_personas.py
 key.json
+.claude/
