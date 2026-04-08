@@ -37,13 +37,10 @@ You interact with buyers who want to negotiate. You must:
 
 For each turn, respond with a JSON object containing:
 - "message": Your natural language response to the buyer
-- "action_type": One of "counter_offer", "accept", "reject"
-- "price": The price you are offering (required for counter_offer)
+- "price": The price you are currently offering
 
-Guidelines:
-- Use "counter_offer" to negotiate or respond during conversation
-- Use "accept" to agree to the buyer's proposed price and complete the sale
-- Use "reject" to refuse and end the interaction
+The buyer will decide whether to accept your price, counter, or walk away.
+You cannot force a sale — you can only negotiate.
 
 Always respond with valid JSON only, no other text.
 """
@@ -61,14 +58,10 @@ def parse_agent_response(response_text: str) -> CraigslistShopAction:
     try:
         data = json.loads(text)
     except json.JSONDecodeError:
-        return CraigslistShopAction(
-            message=response_text[:500],
-            action_type="counter_offer",
-        )
+        return CraigslistShopAction(message=response_text[:500])
 
     return CraigslistShopAction(
         message=data.get("message", ""),
-        action_type=data.get("action_type", "counter_offer"),
         price=data.get("price"),
     )
 
@@ -122,7 +115,6 @@ def run_episode(
         except Exception as e:
             agent_text = json.dumps({
                 "message": f"The price is ${obs.listed_price:.2f}.",
-                "action_type": "counter_offer",
                 "price": obs.listed_price,
             })
             print(f"  Agent LLM error (step {step}): {e}", file=sys.stderr)
@@ -137,7 +129,6 @@ def run_episode(
         episode_log["steps"].append({
             "step": step,
             "agent_response": agent_text,
-            "action_type": action.action_type,
             "action_price": action.price,
             "customer_message": obs.customer_message,
             "reward": result.reward,
